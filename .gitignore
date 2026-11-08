@@ -1,0 +1,11 @@
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+.DS_Store
+App/Info.plist
+App/LayerPal.entitlements
+Widgets/Info.plist
+NotificationService/Info.plist
+NotificationService/NotificationService.entitlements
+Widgets/LayerPalWidgets.entitlements
+Config/Local.xcconfig

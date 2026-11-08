@@ -1,0 +1,130 @@
+# Generate the Xcode project on the Mac:  brew install xcodegen && xcodegen
+# Put your Team ID, bundle ID and relay URL in Config/Local.xcconfig first (see Config/Local.example.xcconfig).
+name: LayerPal
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+options:
+  deploymentTarget:
+    iOS: "17.2" # push-to-start Live Activities
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    # Shown as "LayerPal 0.4.0 (1)". Bump MARKETING_VERSION per release, CURRENT_PROJECT_VERSION per upload.
+    MARKETING_VERSION: "0.4.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  LayerPal:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    resources:
+      - App/Assets.xcassets
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: LayerPal
+        # Only standard HTTPS/TLS; skips the export-compliance prompt on every upload.
+        ITSAppUsesNonExemptEncryption: false
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        UIBackgroundModes: [remote-notification]
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+        BundleBase: $(LAYERPAL_BUNDLE_ID)
+        AppGroup: $(APP_GROUP)
+        RelayURL: $(RELAY_URL)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true # LAN Bambuddy addresses
+    entitlements:
+      path: App/LayerPal.entitlements
+      properties:
+        aps-environment: development
+        com.apple.security.application-groups: [$(APP_GROUP)]
+        keychain-access-groups: [$(AppIdentifierPrefix)$(LAYERPAL_BUNDLE_ID).shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LAYERPAL_BUNDLE_ID)
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: LayerPalWidgets
+      - target: NotificationService
+    scheme:
+      testTargets: [LayerPalTests]
+
+  # Unit tests for the app's pure logic (filament mapping, nozzle rack, preset parsing, forecast, ...).
+  # Run: xcodebuild test -scheme LayerPal -destination "platform=iOS Simulator,name=<iPhone>"
+  LayerPalTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: LayerPal
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: $(LAYERPAL_BUNDLE_ID).tests
+
+  LayerPalWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widgets
+      - Shared
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: LayerPal Widgets
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        AppGroup: $(APP_GROUP)
+        BundleBase: $(LAYERPAL_BUNDLE_ID)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    # Reads the card's expanded/collapsed flag from the App Group.
+    entitlements:
+      path: Widgets/LayerPalWidgets.entitlements
+      properties:
+        com.apple.security.application-groups: [$(APP_GROUP)]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LAYERPAL_BUNDLE_ID).widgets
+
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - NotificationService
+      - Shared
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: LayerPal Notifications
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+        BundleBase: $(LAYERPAL_BUNDLE_ID)
+        AppGroup: $(APP_GROUP)
+        RelayURL: $(RELAY_URL)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: NotificationService/NotificationService.entitlements
+      properties:
+        com.apple.security.application-groups: [$(APP_GROUP)]
+        keychain-access-groups: [$(AppIdentifierPrefix)$(LAYERPAL_BUNDLE_ID).shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LAYERPAL_BUNDLE_ID).notificationservice

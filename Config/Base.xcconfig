@@ -1,0 +1,12 @@
+// Shared build settings. Put your own values in Config/Local.xcconfig
+// (copy Local.example.xcconfig; it's gitignored).
+
+DEVELOPMENT_TEAM =
+LAYERPAL_BUNDLE_ID = com.example.layerpal
+APP_GROUP = group.$(LAYERPAL_BUNDLE_ID)
+// Your LayerPal relay (Cloudflare Worker). Empty disables push notifications
+// and Live Activity updates. xcconfig treats // as a comment, so write URLs as
+// https:/$()/relay.example.com
+RELAY_URL =
+
+#include? "Local.xcconfig"
