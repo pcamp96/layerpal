@@ -19,8 +19,6 @@ struct CamWallView: View {
     @State private var stateFilter: FarmState?
     @State private var onScreen = false
 
-    struct Route: Hashable { let printerId: Int }
-
     private var shown: [Printer] {
         farm.activePrinters
             .filter { farm.state($0.id) != .offline }
@@ -47,7 +45,12 @@ struct CamWallView: View {
                 } else {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
                         ForEach(printers) { printer in
-                            NavigationLink(value: Route(printerId: printer.id)) {
+                            // View-based like the link that pushes this wall: appending a value
+                            // to the Farm tab's NavigationPath would rebuild the stack from the
+                            // path and stack a second wall on top of the live view.
+                            NavigationLink {
+                                CamLiveView(printerId: printer.id)
+                            } label: {
                                 CamWallCell(printer: printer, status: farm.statuses[printer.id],
                                             state: farm.state(printer.id), columns: columns,
                                             interval: Double(interval), active: active)
@@ -63,7 +66,6 @@ struct CamWallView: View {
         .background(Color.bgPrimary)
         .navigationTitle("Camera wall")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: Route.self) { CamLiveView(printerId: $0.printerId) }
         .refreshable { await farm.refresh() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { filterMenu }
