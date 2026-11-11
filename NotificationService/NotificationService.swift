@@ -13,7 +13,11 @@ final class NotificationService: UNNotificationServiceExtension {
         self.content = content
 
         let info = content.userInfo["bambuddy"] as? [String: Any]
-        guard let raw = info?["image_url"] as? String, var url = URL(string: raw) else {
+        // Bambuddy sends a relative path ("/api/v1/archives/…") when its External URL
+        // setting is empty, so resolve against the server address the app saved.
+        guard let raw = info?["image_url"] as? String,
+              var url = URL(string: raw, relativeTo: ServerConfig.serverURL)?.absoluteURL,
+              url.host() != nil else {
             contentHandler(content)
             return
         }

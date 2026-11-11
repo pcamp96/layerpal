@@ -64,19 +64,43 @@ final class MJPEGStream: NSObject, ObservableObject, URLSessionDataDelegate {
     private var session: URLSession?
     private var buffer = Data()
     private var printerId: Int?
+    private var fps = 8
+    private var attempt = 0
+    private var connectTask: Task<Void, Never>?
+
+    /// Retries before showing "Camera unavailable". Bambuddy restarts a stalled
+    /// printer connection after 30 s, so a second try usually gets frames.
+    private static let maxAttempts = 3
 
     func start(printerId: Int, fps: Int = 8) {
         stop()
         self.printerId = printerId
+        self.fps = fps
+        attempt = 0
         failed = false
-        Task {
+        connect()
+    }
+
+    private func connect() {
+        guard let printerId else { return }
+        attempt += 1
+        let fps = fps
+        connectTask = Task {
+            // The printer's camera serves one connection well. A snapshot still in
+            // flight (for example the camera wall tile just tapped) starves the
+            // stream until Bambuddy's 30 s timeout, so let it finish first.
+            await CameraActivity.shared.waitForSnapshots(printerId)
+            guard !Task.isCancelled, self.printerId == printerId else { return }
             guard let url = await APIClient.shared.mediaURL("printers/\(printerId)/camera/stream",
                                                              extra: [URLQueryItem(name: "fps", value: String(fps))]) else {
                 failed = true
                 return
             }
+            guard !Task.isCancelled, self.printerId == printerId else { return }
             let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 20
+            // Longer than Bambuddy's 30 s stall timeout, so a server-side reconnect
+            // can still deliver frames on this request.
+            config.timeoutIntervalForRequest = 40
             let session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
             self.session = session
             session.dataTask(with: url).resume()
@@ -84,6 +108,8 @@ final class MJPEGStream: NSObject, ObservableObject, URLSessionDataDelegate {
     }
 
     func stop() {
+        connectTask?.cancel()
+        connectTask = nil
         session?.invalidateAndCancel()
         session = nil
         buffer.removeAll()
@@ -95,9 +121,24 @@ final class MJPEGStream: NSObject, ObservableObject, URLSessionDataDelegate {
         MainActor.assumeIsolated { self.consume(data) }
     }
 
-    nonisolated func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
+    nonisolated func urlSession(_ session: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
         MainActor.assumeIsolated {
-            if error != nil, self.frame == nil { self.failed = true }
+            // Ignore sessions we already replaced or stopped.
+            guard session === self.session, self.printerId != nil else { return }
+            self.session = nil
+            if (error as? URLError)?.code == .cancelled { return }
+            // The stream ended or stalled (printer busy, server restarting ffmpeg,
+            // network blip). Reconnect a few times before showing the error.
+            if self.attempt < Self.maxAttempts {
+                self.buffer.removeAll()
+                self.connectTask = Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self.connect()
+                }
+            } else if self.frame == nil {
+                self.failed = true
+            }
         }
     }
 
@@ -107,7 +148,10 @@ final class MJPEGStream: NSObject, ObservableObject, URLSessionDataDelegate {
         while let start = buffer.range(of: soi), let end = buffer.range(of: eoi, in: start.upperBound ..< buffer.endIndex) {
             let jpeg = buffer.subdata(in: start.lowerBound ..< end.upperBound)
             buffer.removeSubrange(buffer.startIndex ..< end.upperBound)
-            if let image = UIImage(data: jpeg) { frame = image }
+            if let image = UIImage(data: jpeg) {
+                frame = image
+                attempt = 0 // a working stream earns a fresh set of retries
+            }
         }
         if buffer.count > 4_000_000 { buffer.removeAll() } // never let a bad stream grow unbounded
     }
@@ -159,5 +203,48 @@ struct LiveCameraView: View {
                 .padding()
             }
         }
+    }
+}
+
+/// Tracks camera snapshot requests per printer so a live view can wait for
+/// them. The printer's camera handles one connection well: if a snapshot and
+/// the live stream connect together, the stream gets no frames for 30 s.
+actor CameraActivity {
+    static let shared = CameraActivity()
+    private var inFlight: [Int: Int] = [:]
+    private var lastStart: [Int: Date] = [:]
+
+    /// Bambuddy keeps capturing for about 2 s after the app cancels a snapshot
+    /// (as a camera wall tile does when you tap it), so treat a recent start as
+    /// busy even when the request already ended on the phone.
+    private static let serverCapture: TimeInterval = 2.5
+
+    func snapshotStarted(_ printerId: Int) {
+        inFlight[printerId, default: 0] += 1
+        lastStart[printerId] = Date()
+    }
+
+    func snapshotFinished(_ printerId: Int) {
+        let left = (inFlight[printerId] ?? 1) - 1
+        inFlight[printerId] = left > 0 ? left : nil
+    }
+
+    private func busy(_ printerId: Int) -> Bool {
+        if inFlight[printerId] != nil { return true }
+        guard let started = lastStart[printerId] else { return false }
+        return Date().timeIntervalSince(started) < Self.serverCapture
+    }
+
+    /// Waits until the printer has no snapshot running, then a short gap so
+    /// Bambuddy closes its printer connection. Gives up after `limit` seconds;
+    /// a snapshot request times out at 15 s anyway.
+    func waitForSnapshots(_ printerId: Int, limit: TimeInterval = 16) async {
+        guard busy(printerId) else { return }
+        let deadline = Date().addingTimeInterval(limit)
+        while busy(printerId), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if Task.isCancelled { return }
+        }
+        try? await Task.sleep(nanoseconds: 400_000_000)
     }
 }

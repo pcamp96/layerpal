@@ -17,6 +17,8 @@ extension APIClient {
     /// GET /printers/{id}/camera/snapshot?token=... Returns JPEG bytes, or nil
     /// when the camera can't deliver (503: offline, busy, still starting).
     func cameraSnapshot(_ printerId: Int) async -> Data? {
+        await CameraActivity.shared.snapshotStarted(printerId)
+        defer { Task { await CameraActivity.shared.snapshotFinished(printerId) } }
         guard let url = await mediaURL("printers/\(printerId)/camera/snapshot") else { return nil }
         guard let (data, response) = try? await Self.snapshotSession.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
