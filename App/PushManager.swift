@@ -151,7 +151,7 @@ final class PushManager: ObservableObject {
     /// guaranteed order, so never pick by position: a just-started card wins, then one the
     /// relay can reach (has a push token), then the most recently updated.
     @discardableResult
-    func dedupeActivities(keeping preferred: PrintsActivity? = nil) async -> PrintsActivity? {
+    private func dedupeActivities(keeping preferred: PrintsActivity? = nil) async -> PrintsActivity? {
         let all = PrintsActivity.activities.filter { $0.activityState == .active || $0.activityState == .stale }
         let keep = preferred.flatMap { p in all.first { $0.id == p.id } }
             ?? all.filter { $0.pushToken != nil }.max { $0.content.state.updatedAt < $1.content.state.updatedAt }
