@@ -1,4 +1,5 @@
 import ActivityKit
+import os
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -22,6 +23,7 @@ final class PushManager: ObservableObject {
     @Published var openPrinterName: String?
 
     private var observedActivities = Set<String>()
+    private let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LayerPal", category: "LiveActivity")
     private var started = false
 
     func start() {
@@ -112,15 +114,18 @@ final class PushManager: ObservableObject {
     }
 
     private func observeActivities() async {
-        for activity in PrintsActivity.activities { observe(activity) }
-        for await activity in PrintsActivity.activityUpdates { observe(activity) }
+        for activity in PrintsActivity.activities { observe(activity, isNew: false) }
+        // A card arriving here was just started (by the relay's push-to-start or by us): it's the keeper.
+        for await activity in PrintsActivity.activityUpdates { observe(activity, isNew: true) }
     }
 
-    private func observe(_ activity: PrintsActivity) {
+    private func observe(_ activity: PrintsActivity, isNew: Bool) {
         guard observedActivities.insert(activity.id).inserted else { return }
-        Task { await dedupeActivities() }
+        log.info("observe \(activity.id, privacy: .public) new=\(isNew) state=\(String(describing: activity.activityState), privacy: .public) token=\(activity.pushToken != nil)")
+        Task { await dedupeActivities(keeping: isNew ? activity : nil) }
         Task {
             for await data in activity.pushTokenUpdates {
+                log.info("token for \(activity.id, privacy: .public)")
                 await register(activity: activity, token: data.hexString)
             }
         }
@@ -129,7 +134,9 @@ final class PushManager: ObservableObject {
     private func register(activity _: PrintsActivity, token: String) async {
         do {
             try await RelayClient.shared.registerActivity(pushToken: token)
+            log.info("registered activity token with relay")
         } catch {
+            log.error("activity token registration failed: \(error.localizedDescription, privacy: .public)")
             lastError = "Live Activity registration failed: \(error.localizedDescription)"
         }
     }
@@ -140,12 +147,22 @@ final class PushManager: ObservableObject {
     // MARK: One card, user-controllable
 
     /// The relay (push-to-start) and the app (while open) can both start a card for the
-    /// same print. Keep only the newest one and point the relay at it.
-    func dedupeActivities() async {
+    /// same print. Keep one and point the relay at it. `Activity.activities` has no
+    /// guaranteed order, so never pick by position: a just-started card wins, then one the
+    /// relay can reach (has a push token), then the most recently updated.
+    @discardableResult
+    func dedupeActivities(keeping preferred: PrintsActivity? = nil) async -> PrintsActivity? {
         let all = PrintsActivity.activities.filter { $0.activityState == .active || $0.activityState == .stale }
-        guard all.count > 1, let keep = all.last else { return }
-        for extra in all.dropLast() { await extra.end(nil, dismissalPolicy: .immediate) }
-        if let token = keep.pushToken { await register(activity: keep, token: token.hexString) }
+        let keep = preferred.flatMap { p in all.first { $0.id == p.id } }
+            ?? all.filter { $0.pushToken != nil }.max { $0.content.state.updatedAt < $1.content.state.updatedAt }
+            ?? all.max { $0.content.state.updatedAt < $1.content.state.updatedAt }
+        guard let keep else { return nil }
+        for extra in all where extra.id != keep.id {
+            log.info("ending duplicate card \(extra.id, privacy: .public), keeping \(keep.id, privacy: .public)")
+            await extra.end(nil, dismissalPolicy: .immediate)
+        }
+        if all.count > 1, let token = keep.pushToken { await register(activity: keep, token: token.hexString) }
+        return keep
     }
 
     /// "Lock Screen print activity" switch.
@@ -194,8 +211,7 @@ final class PushManager: ObservableObject {
                 }
                 return
             }
-            await dedupeActivities()
-            if let existing = PrintsActivity.activities.last ?? existing {
+            if let existing = await dedupeActivities() ?? existing {
                 await existing.update(content)
             } else if ActivityAuthorizationInfo().areActivitiesEnabled {
                 do {
@@ -204,7 +220,7 @@ final class PushManager: ObservableObject {
                         content: content,
                         pushType: .token
                     )
-                    observe(activity)
+                    observe(activity, isNew: true)
                 } catch {
                     lastError = "Couldn't start Live Activity: \(error.localizedDescription)"
                 }
