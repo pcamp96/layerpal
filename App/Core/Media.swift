@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -54,6 +55,75 @@ struct RemoteImage: View {
     }
 }
 
+/// Job thumbnail for a printer card: the print's cover when Bambuddy has the
+/// 3MF, otherwise a camera snapshot (prints sent without the file, such as
+/// from Bambu Handy or the cloud, have no cover). The snapshot refreshes
+/// while the card is on screen and goes through the camera wall's gate.
+struct PrintThumbnail: View {
+    let printerId: Int
+    let coverPath: String?
+    let cameraAllowed: Bool
+    var refresh: TimeInterval = 60
+    @State private var image: UIImage?
+    @State private var isCamera = false
+
+    var body: some View {
+        ZStack {
+            Color.bgRaised
+            if let image {
+                Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Image(systemName: "cube.transparent").font(.title3).foregroundStyle(Color.textMuted)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if isCamera, image != nil {
+                Image(systemName: "video.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .padding(3)
+                    .background(.black.opacity(0.55), in: Circle())
+                    .foregroundStyle(.white)
+                    .padding(3)
+                    .accessibilityHidden(true)
+            }
+        }
+        .clipped()
+        .task(id: coverPath) { await load() }
+    }
+
+    private func load() async {
+        if let coverPath, let cover = await ImageCache.shared.image(apiPath: coverPath) {
+            image = cover
+            isCamera = false
+            return
+        }
+        guard cameraAllowed else { image = nil; return }
+        // Cancelled when the card scrolls away or the screen changes.
+        while !Task.isCancelled {
+            await SnapshotGate.shared.acquire()
+            let data = Task.isCancelled ? nil : await APIClient.shared.cameraSnapshot(printerId)
+            await SnapshotGate.shared.release()
+            if let data, !Task.isCancelled,
+               let frame = await Task.detached(priority: .utility, operation: { Self.downsample(data) }).value {
+                image = frame
+                isCamera = true
+            }
+            try? await Task.sleep(nanoseconds: UInt64(refresh * 1_000_000_000))
+        }
+    }
+
+    private nonisolated static func downsample(_ data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 240,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map(UIImage.init(cgImage:))
+    }
+}
+
 /// Live camera via Bambuddy's MJPEG endpoint. Frames are split on JPEG
 /// start/end markers, which works regardless of the multipart boundary.
 @MainActor
@@ -105,6 +175,13 @@ final class MJPEGStream: NSObject, ObservableObject, URLSessionDataDelegate {
             self.session = session
             session.dataTask(with: url).resume()
         }
+    }
+
+    /// Starts the stream unless it is already running for this printer
+    /// (for example when returning from full screen).
+    func ensureRunning(printerId: Int) {
+        if self.printerId == printerId, session != nil || connectTask != nil { return }
+        start(printerId: printerId)
     }
 
     func stop() {
@@ -161,12 +238,13 @@ struct LiveCameraView: View {
     let printerId: Int
     @StateObject private var stream = MJPEGStream()
     @State private var fullscreen = false
+    @State private var inlineZoom: CGFloat = 1
 
     var body: some View {
         ZStack {
             Color.black
             if let frame = stream.frame {
-                Image(uiImage: frame).resizable().scaledToFit()
+                ZoomableImage(image: frame, scale: $inlineZoom)
             } else if stream.failed {
                 VStack(spacing: 6) {
                     Image(systemName: "video.slash").font(.title2)
@@ -187,22 +265,142 @@ struct LiveCameraView: View {
                     .background(.black.opacity(0.55), in: Capsule())
                     .foregroundStyle(.white)
                     .padding(8)
+                    .allowsHitTesting(false)
             }
         }
-        .onTapGesture { if stream.frame != nil { fullscreen = true } }
-        .onAppear { stream.start(printerId: printerId) }
-        .onDisappear { stream.stop() }
-        .fullScreenCover(isPresented: $fullscreen) {
-            ZStack(alignment: .topTrailing) {
-                Color.black.ignoresSafeArea()
-                if let frame = stream.frame { Image(uiImage: frame).resizable().scaledToFit() }
-                Button { fullscreen = false } label: {
-                    Image(systemName: "xmark.circle.fill").font(.title).symbolRenderingMode(.hierarchical)
+        .overlay(alignment: .bottomTrailing) {
+            if stream.frame != nil {
+                Button { fullscreen = true } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 32, height: 32)
+                        .background(.black.opacity(0.55), in: Circle())
+                        .foregroundStyle(.white)
                 }
-                .foregroundStyle(.white)
-                .padding()
+                .padding(8)
+                .accessibilityLabel("Full screen")
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { if stream.frame != nil, inlineZoom <= 1 { fullscreen = true } }
+        .onAppear { stream.ensureRunning(printerId: printerId) }
+        // Presenting the full-screen cover also fires onDisappear here; keep streaming for it.
+        .onDisappear { if !fullscreen { stream.stop() } }
+        .fullScreenCover(isPresented: $fullscreen) {
+            FullscreenCamera(stream: stream) { fullscreen = false }
+        }
+    }
+}
+
+/// Full-screen live view: pinch or double-tap to zoom, drag to pan, swipe
+/// down or tap Done to close.
+private struct FullscreenCamera: View {
+    @ObservedObject var stream: MJPEGStream
+    let close: () -> Void
+    @State private var zoom: CGFloat = 1
+    @State private var pull: CGFloat = 0
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(1 - min(Double(pull) / 400, 0.6)).ignoresSafeArea()
+            if let frame = stream.frame {
+                ZoomableImage(image: frame, scale: $zoom, doubleTapToZoom: true)
+                    .offset(y: pull)
+            } else {
+                ProgressView().tint(.white)
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onChanged { value in
+                    guard zoom <= 1 else { return }
+                    pull = max(0, value.translation.height)
+                }
+                .onEnded { value in
+                    guard zoom <= 1 else { return }
+                    if value.translation.height > 120 || value.predictedEndTranslation.height > 300 {
+                        close()
+                    } else {
+                        withAnimation(.spring(duration: 0.25)) { pull = 0 }
+                    }
+                }
+        )
+        .overlay(alignment: .topTrailing) {
+            Button(action: close) {
+                Text("Done")
+                    .font(.body.weight(.semibold))
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .environment(\.colorScheme, .dark)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+        }
+    }
+}
+
+/// Pinch to zoom (1x to 5x) and drag to pan while zoomed. Drag only engages
+/// when zoomed, so an inline view still scrolls with its page.
+struct ZoomableImage: View {
+    let image: UIImage
+    @Binding var scale: CGFloat
+    var doubleTapToZoom = false
+    @GestureState private var pinch: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @GestureState private var drag: CGSize = .zero
+
+    private static let maxScale: CGFloat = 5
+
+    var body: some View {
+        GeometryReader { geo in
+            let live = min(max(scale * pinch, 1), Self.maxScale)
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: geo.size.width, height: geo.size.height)
+                .scaleEffect(live)
+                .offset(clamp(CGSize(width: offset.width + drag.width, height: offset.height + drag.height),
+                              scale: live, size: geo.size))
+                .contentShape(Rectangle())
+                .gesture(
+                    MagnifyGesture()
+                        .updating($pinch) { value, state, _ in state = value.magnification }
+                        .onEnded { value in
+                            scale = min(max(scale * value.magnification, 1), Self.maxScale)
+                            offset = scale <= 1 ? .zero : clamp(offset, scale: scale, size: geo.size)
+                        }
+                )
+                .simultaneousGesture(
+                    DragGesture()
+                        .updating($drag) { value, state, _ in state = value.translation }
+                        .onEnded { value in
+                            offset = clamp(CGSize(width: offset.width + value.translation.width,
+                                                  height: offset.height + value.translation.height),
+                                           scale: scale, size: geo.size)
+                        },
+                    including: scale > 1 ? .all : .subviews
+                )
+                // Only full screen gets double-tap; inline it would delay the
+                // single tap that opens full screen.
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        withAnimation(.spring(duration: 0.3)) {
+                            if scale > 1 { scale = 1; offset = .zero } else { scale = 2.5 }
+                        }
+                    },
+                    including: doubleTapToZoom ? .all : .subviews
+                )
+        }
+        .clipped()
+    }
+
+    /// Keeps the zoomed image covering the frame instead of sliding off it.
+    private func clamp(_ proposed: CGSize, scale: CGFloat, size: CGSize) -> CGSize {
+        guard scale > 1 else { return .zero }
+        let maxX = size.width * (scale - 1) / 2, maxY = size.height * (scale - 1) / 2
+        return CGSize(width: min(max(proposed.width, -maxX), maxX),
+                      height: min(max(proposed.height, -maxY), maxY))
     }
 }
 

@@ -345,7 +345,8 @@ struct PrinterCard: View {
                 }
                 if let status, status.isPrinting {
                     HStack(alignment: .top, spacing: 12) {
-                        RemoteImage(path: status.coverUrl)
+                        PrintThumbnail(printerId: printer.id, coverPath: status.coverUrl,
+                                       cameraAllowed: farm.can("camera:view"))
                             .frame(width: 56, height: 56)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         VStack(alignment: .leading, spacing: 6) {
