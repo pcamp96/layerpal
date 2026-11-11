@@ -23,6 +23,8 @@ final class PushManager: ObservableObject {
     @Published var openPrinterName: String?
 
     private var observedActivities = Set<String>()
+    /// When each card was first seen, to tell "token still on its way" from "never getting one".
+    private var firstSeen: [String: Date] = [:]
     private let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LayerPal", category: "LiveActivity")
     private var started = false
 
@@ -121,6 +123,7 @@ final class PushManager: ObservableObject {
 
     private func observe(_ activity: PrintsActivity, isNew: Bool) {
         guard observedActivities.insert(activity.id).inserted else { return }
+        firstSeen[activity.id] = Date()
         log.info("observe \(activity.id, privacy: .public) new=\(isNew) state=\(String(describing: activity.activityState), privacy: .public) token=\(activity.pushToken != nil)")
         Task { await dedupeActivities(keeping: isNew ? activity : nil) }
         Task {
@@ -211,8 +214,18 @@ final class PushManager: ObservableObject {
                 }
                 return
             }
-            if let existing = await dedupeActivities() ?? existing {
-                await existing.update(content)
+            var card = await dedupeActivities() ?? existing
+            // A card the relay can't reach (no update token after a grace period, e.g. one
+            // push-started without input-push-token) would freeze once the app closes.
+            // Replace it with one we start ourselves, which always gets a token.
+            if let stuck = card, stuck.pushToken == nil,
+               Date().timeIntervalSince(firstSeen[stuck.id] ?? .distantPast) > 20 {
+                log.info("replacing tokenless card \(stuck.id, privacy: .public)")
+                await stuck.end(nil, dismissalPolicy: .immediate)
+                card = nil
+            }
+            if let card {
+                await card.update(content)
             } else if ActivityAuthorizationInfo().areActivitiesEnabled {
                 do {
                     let activity = try PrintsActivity.request(
