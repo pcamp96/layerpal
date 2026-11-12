@@ -136,6 +136,16 @@ private struct FarmBar: View {
     let state: PrintsActivityAttributes.ContentState
 
     var body: some View {
+        // With one active print the split strip is always 100% one color and reads as a finished
+        // progress bar, so show that print's real progress instead.
+        if state.activeCount <= 1, let only = state.prints.first(where: \.isActive) {
+            LiveBar(item: only)
+        } else {
+            strip
+        }
+    }
+
+    @ViewBuilder private var strip: some View {
         let segments: [(Int, Color, String)] = [
             (state.errors, Palette.error, "need you"),
             (state.paused, Palette.warning, "paused"),
