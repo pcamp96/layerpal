@@ -131,7 +131,7 @@ private struct LockScreenCard: View {
     }
 }
 
-/// One strip split by state, so 80 printers still read at a glance.
+/// Real progress for a single print; for a farm, one block per printer colored by state.
 private struct FarmBar: View {
     let state: PrintsActivityAttributes.ContentState
 
@@ -151,13 +151,16 @@ private struct FarmBar: View {
             (state.paused, Palette.warning, "paused"),
             (state.printing, Palette.green, "printing"),
         ].filter { $0.0 > 0 }
-        let total = max(1, segments.reduce(0) { $0 + $1.0 })
+        let pips = Self.pips(segments.map { ($0.0, $0.1) })
         VStack(alignment: .leading, spacing: 3) {
+            // One block per printer (scaled down for big farms), left-aligned with gaps,
+            // so it reads as a head count rather than a progress bar.
             GeometryReader { geo in
-                HStack(spacing: 2) {
-                    ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
-                        Capsule().fill(seg.1)
-                            .frame(width: max(4, geo.size.width * CGFloat(seg.0) / CGFloat(total) - 2))
+                let gap: CGFloat = 3
+                let fit = (geo.size.width - gap * CGFloat(pips.count - 1)) / CGFloat(max(1, pips.count))
+                HStack(spacing: gap) {
+                    ForEach(Array(pips.enumerated()), id: \.offset) { _, color in
+                        RoundedRectangle(cornerRadius: 1.5).fill(color).frame(width: min(14, fit))
                     }
                 }
             }
@@ -173,6 +176,16 @@ private struct FarmBar: View {
             .font(.caption2).foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// One color per printer, capped at `cap` blocks; past that each group keeps its share (at least one block).
+    static func pips(_ groups: [(Int, Color)], cap: Int = 24) -> [Color] {
+        let total = groups.reduce(0) { $0 + $1.0 }
+        guard total > 0 else { return [] }
+        return groups.flatMap { count, color -> [Color] in
+            let n = total <= cap ? count : max(1, Int((Double(count) / Double(total) * Double(cap)).rounded()))
+            return Array(repeating: color, count: n)
+        }
     }
 }
 
