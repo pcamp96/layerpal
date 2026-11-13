@@ -4,6 +4,8 @@ Renders at 4x and downsamples for clean edges. Outputs:
   icon.png        default (dark gradient background, full bleed; iOS applies the mask)
   icon-dark.png   iOS dark appearance: transparent background, system supplies the backdrop
   icon-tinted.png iOS tinted appearance: grayscale on transparent, system recolors it
+  <icon dir>/Assets/mark.png  foreground layer for the Icon Composer document (optional 2nd arg),
+                  whose icon.json supplies the same gradient background
 """
 import math
 import pathlib
@@ -78,6 +80,14 @@ save(dark, "icon-dark.png")
 tinted = Image.new("RGBA", (S, S), (0, 0, 0, 0))
 draw_mark(tinted, (255, 255, 255), (90, 90, 90, 255), (200, 200, 200))
 save(tinted, "icon-tinted.png")
+
+# Icon Composer layer: the default mark on transparent; icon.json draws the background.
+if len(sys.argv) > 2:
+    assets = pathlib.Path(sys.argv[2]) / "Assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    mark = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    draw_mark(mark, GREEN, TRACK, WHITE)
+    mark.resize((1024, 1024), Image.LANCZOS).save(assets / "mark.png")
 
 # Preview strip (default / dark on black / tinted on a sample tint), masked to the iOS shape.
 def masked(img, bg=None):
